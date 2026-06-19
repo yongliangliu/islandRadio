@@ -374,47 +374,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleWordTapped(word: String, sentence: String, sourceWindow: IslandWindow) {
         guard let wordStore = wordStore else { return }
+        let t0 = CFAbsoluteTimeGetCurrent()
         appLog("[App] Word tapped: '\(word)' in sentence: '\(sentence)'")
 
         // Immediately highlight the tapped word in all Island windows
         var words = wordStore.learnedWordsSet
         words.insert(word.lowercased())
         forEachIslandWindow { $0.updateLearnedWords(words) }
+        appLog("[Perf] highlight word: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
         // Pause playback
         if audioPlayer?.isPlaying == true {
             audioPlayer?.pause()
             pausedForLookup = true
         }
+        appLog("[Perf] pause playback: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
         // Show loading card only on the window where the word was tapped
         sourceWindow.showWordCardLoading(word: word)
+        appLog("[Perf] show loading card: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
         // Check cache first
         if let cached = wordStore.cachedTranslation(for: word, sentence: sentence) {
+            appLog("[Perf] cache hit: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
             appLog("[App] Using cached translation for '\(word)'")
             sourceWindow.showWordCardResult(word: word, result: cached)
             addToLearningList(word: word, sentence: sentence, result: cached)
+            appLog("[Perf] cache total: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
             return
         }
+        appLog("[Perf] cache miss: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
         // Query LLM
         let config = LLMConfig.load()
+        appLog("[Perf] load config: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
+
         Task {
             let taskStart = CFAbsoluteTimeGetCurrent()
+            appLog("[Perf] task started (delay from t0: \(String(format: "%.3f", taskStart - t0))s)")
             do {
                 let result = try await LLMService.translateWord(word, sentence: sentence, config: config)
-                let elapsed = CFAbsoluteTimeGetCurrent() - taskStart
-                appLog("[App] LLM result for '\(word)': \(result.meaning ?? "nil") (total \(String(format: "%.2f", elapsed))s)")
+                let apiElapsed = CFAbsoluteTimeGetCurrent() - taskStart
+                appLog("[Perf] LLM returned: \(String(format: "%.3f", apiElapsed))s (from tap: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s)")
 
                 // Cache the result
                 wordStore.cacheTranslation(result, for: word, sentence: sentence)
+                appLog("[Perf] cached result: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
                 // Show result on the source window
                 sourceWindow.showWordCardResult(word: word, result: result)
+                appLog("[Perf] showed card: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
                 // Add to learning list
                 addToLearningList(word: word, sentence: sentence, result: result)
+                appLog("[Perf] done (total from tap): \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
+                appLog("[App] LLM result for '\(word)': \(result.meaning ?? "nil") (total \(String(format: "%.2f", apiElapsed))s)")
             } catch {
                 appLog("[App] LLM error for '\(word)': \(error.localizedDescription)")
                 sourceWindow.showWordCardError(word: word, message: error.localizedDescription)

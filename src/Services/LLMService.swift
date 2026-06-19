@@ -54,25 +54,21 @@ enum LLMService {
         sentence: String,
         config: LLMConfig
     ) async throws -> TranslationResult {
-        let totalStart = CFAbsoluteTimeGetCurrent()
+        let t0 = CFAbsoluteTimeGetCurrent()
         let prompt = buildPrompt(word: word, sentence: sentence)
+        appLog("[Perf] buildPrompt: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
         let responseText: String
-        let apiStart = CFAbsoluteTimeGetCurrent()
         switch config.provider {
         case .openai:
-            responseText = try await callOpenAI(prompt: prompt, config: config)
+            responseText = try await callOpenAI(prompt: prompt, config: config, t0: t0)
         case .anthropic:
-            responseText = try await callAnthropic(prompt: prompt, config: config)
+            responseText = try await callAnthropic(prompt: prompt, config: config, t0: t0)
         }
-        let apiEnd = CFAbsoluteTimeGetCurrent()
-        appLog("[LLM] API call took \(String(format: "%.2f", apiEnd - apiStart))s (\(config.provider.rawValue))")
+        appLog("[Perf] API done: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s (\(config.provider.rawValue))")
 
-        let parseStart = CFAbsoluteTimeGetCurrent()
         let result = parseResponse(responseText)
-        let parseEnd = CFAbsoluteTimeGetCurrent()
-        appLog("[LLM] Parse took \(String(format: "%.4f", parseEnd - parseStart))s")
-        appLog("[LLM] Total translateWord took \(String(format: "%.2f", parseEnd - totalStart))s")
+        appLog("[Perf] parsed: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
         return result
     }
@@ -101,7 +97,7 @@ enum LLMService {
 
     // MARK: - OpenAI-compatible API
 
-    private static func callOpenAI(prompt: String, config: LLMConfig) async throws -> String {
+    private static func callOpenAI(prompt: String, config: LLMConfig, t0: CFAbsoluteTime) async throws -> String {
         guard !config.apiKey.isEmpty else {
             throw LLMError.noAPIKey
         }
@@ -117,10 +113,15 @@ enum LLMService {
             "messages": [["role": "user", "content": prompt]],
             "temperature": 0.3,
             "max_tokens": 800,
+            "thinking": ["type": "disabled"],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        appLog("[Perf] request built: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s (body \(request.httpBody?.count ?? 0) bytes)")
 
+        let sendStart = CFAbsoluteTimeGetCurrent()
         let (data, response) = try await URLSession.shared.data(for: request)
+        let recvDone = CFAbsoluteTimeGetCurrent()
+        appLog("[Perf] URLSession.data: \(String(format: "%.3f", recvDone - sendStart))s (from tap: \(String(format: "%.3f", recvDone - t0))s, \(data.count) bytes)")
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw LLMError.invalidResponse
@@ -138,6 +139,7 @@ enum LLMService {
             appLog("[LLM] OpenAI response is not valid JSON")
             throw LLMError.invalidResponse
         }
+        appLog("[Perf] JSON parsed: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
         // Standard path: choices[0].message.content
         if let choices = json["choices"] as? [[String: Any]],
@@ -177,7 +179,7 @@ enum LLMService {
 
     // MARK: - Anthropic API
 
-    private static func callAnthropic(prompt: String, config: LLMConfig) async throws -> String {
+    private static func callAnthropic(prompt: String, config: LLMConfig, t0: CFAbsoluteTime) async throws -> String {
         guard !config.apiKey.isEmpty else {
             throw LLMError.noAPIKey
         }
@@ -197,8 +199,12 @@ enum LLMService {
             "thinking": ["type": "disabled"],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        appLog("[Perf] anthropic request built: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
+        let sendStart = CFAbsoluteTimeGetCurrent()
         let (data, response) = try await URLSession.shared.data(for: request)
+        let recvDone = CFAbsoluteTimeGetCurrent()
+        appLog("[Perf] anthropic URLSession.data: \(String(format: "%.3f", recvDone - sendStart))s (from tap: \(String(format: "%.3f", recvDone - t0))s)")
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw LLMError.invalidResponse
