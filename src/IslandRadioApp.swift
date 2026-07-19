@@ -39,6 +39,8 @@ struct IslandRadioApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// One IslandWindow per screen, keyed by screen identifier
     private var islandWindows: [String: IslandWindow] = [:]
+    /// Mirrors Island content onto the Touch Bar (MacBook Pro with Touch Bar)
+    private var touchBarController: TouchBarController?
     private var cancellables = Set<AnyCancellable>()
     private var mediaKeyMonitor: Any?
     private var localKeyMonitor: Any?
@@ -76,6 +78,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         createIslandWindows()
         appLog("[App] Island windows created (\(islandWindows.count) screen(s))")
 
+        // Mirror the Island onto the Touch Bar (no-op on Macs without one)
+        setupTouchBar()
+
         // Monitor screen changes (connect/disconnect monitors)
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -106,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let station = initialStation {
             forEachIslandWindow { $0.updateStation(name: station.name, color: station.color, isPlaying: false) }
+            touchBarController?.updateStation(name: station.name, color: station.color, isPlaying: false)
         }
 
         // Observe state changes to update Island
@@ -126,6 +132,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     nonisolated func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return false  // Keep running when main window is closed
+    }
+
+    // MARK: - Touch Bar
+
+    /// Set up the Touch Bar controller and wire its buttons to the same handlers
+    /// used by the Island window. Safe no-op on Macs without a Touch Bar.
+    private func setupTouchBar() {
+        let controller = TouchBarController()
+        guard controller.isAvailable else {
+            appLog("[App] Touch Bar not available on this Mac")
+            return
+        }
+        controller.onPlayTapped = { [weak self] in self?.handlePlayTapped() }
+        controller.onNextTapped = { [weak self] in self?.handleNextTapped() }
+        controller.onRecordTapped = { [weak self] in self?.handleRecordTapped() }
+        controller.onWordTapped = { [weak self] word, sentence in
+            guard let self = self, let anyWindow = self.islandWindows.values.first else { return }
+            self.handleWordTapped(word: word, sentence: sentence, sourceWindow: anyWindow)
+        }
+        touchBarController = controller
+        // Seed current learned words for highlighting on the Touch Bar
+        if let words = wordStore?.learnedWordsSet {
+            controller.updateLearnedWords(words)
+        }
+        appLog("[App] Touch Bar controller installed")
     }
 
     // MARK: - Island Window Management
@@ -381,6 +412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var words = wordStore.learnedWordsSet
         words.insert(word.lowercased())
         forEachIslandWindow { $0.updateLearnedWords(words) }
+        touchBarController?.updateLearnedWords(words)
         appLog("[Perf] highlight word: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
         // Pause playback
@@ -399,6 +431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appLog("[Perf] cache hit: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
             appLog("[App] Using cached translation for '\(word)'")
             sourceWindow.showWordCardResult(word: word, result: cached)
+            touchBarController?.showWordCard(word: word, meaning: cached.meaning)
             addToLearningList(word: word, sentence: sentence, result: cached)
             appLog("[Perf] cache total: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
             return
@@ -423,6 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 // Show result on the source window
                 sourceWindow.showWordCardResult(word: word, result: result)
+                touchBarController?.showWordCard(word: word, meaning: result.meaning)
                 appLog("[Perf] showed card: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
 
                 // Add to learning list
@@ -458,9 +492,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Update Island highlighting on all windows
         forEachIslandWindow { $0.updateLearnedWords(wordStore.learnedWordsSet) }
+        touchBarController?.updateLearnedWords(wordStore.learnedWordsSet)
     }
 
     private func handleWordCardDismissed() {
+        touchBarController?.dismissWordCard()
         // Resume playback if it was paused for lookup
         if pausedForLookup {
             audioPlayer?.resume()
@@ -486,6 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.forEachIslandWindow {
                         $0.updateStation(name: station.name, color: station.color, isPlaying: isPlaying)
                     }
+                    self?.touchBarController?.updateStation(name: station.name, color: station.color, isPlaying: isPlaying)
                 } else {
                     // Show last played or first station when nothing is playing
                     let fallback: RadioStation?
@@ -498,6 +535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.forEachIslandWindow {
                         $0.updateStation(name: fallback?.name ?? "", color: fallback?.color, isPlaying: false)
                     }
+                    self?.touchBarController?.updateStation(name: fallback?.name ?? "", color: fallback?.color, isPlaying: false)
                 }
                 self?.updateNowPlaying()
 
@@ -521,6 +559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] subtitle in
                 self?.forEachIslandWindow { $0.updateSubtitle(subtitle) }
+                self?.touchBarController?.updateSubtitle(subtitle)
             }
             .store(in: &cancellables)
 
@@ -529,6 +568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] listening in
                 self?.forEachIslandWindow { $0.updateRecording(listening) }
+                self?.touchBarController?.updateRecording(listening)
             }
             .store(in: &cancellables)
 
@@ -539,6 +579,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .sink { [weak self] _ in
                     guard let ws = self?.wordStore else { return }
                     self?.forEachIslandWindow { $0.updateLearnedWords(ws.learnedWordsSet) }
+                    self?.touchBarController?.updateLearnedWords(ws.learnedWordsSet)
                 }
                 .store(in: &cancellables)
         }

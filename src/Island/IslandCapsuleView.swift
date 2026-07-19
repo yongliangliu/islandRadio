@@ -505,7 +505,7 @@ final class IslandCapsuleView: NSView {
     /// If `text` exceeds `maxLines` when laid out at `width`, repeatedly remove
     /// the entire first visual line until it fits. This avoids per-character
     /// jitter — text only shifts when a full line overflows.
-    private static func dropOverflowLines(_ text: String, maxLines: Int, width: CGFloat, font: NSFont) -> String {
+    static func dropOverflowLines(_ text: String, maxLines: Int, width: CGFloat, font: NSFont) -> String {
         guard width > 0, maxLines > 0 else { return text }
 
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
@@ -817,6 +817,11 @@ final class ClickableSubtitleView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) not implemented")
+    }
+
+    /// Configure the maximum number of visible lines (Island uses 2; Touch Bar uses 1).
+    func setMaximumNumberOfLines(_ n: Int) {
+        textContainer.maximumNumberOfLines = n
     }
 
     override var isFlipped: Bool { true }
