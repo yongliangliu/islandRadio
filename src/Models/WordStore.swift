@@ -319,10 +319,17 @@ final class WordStore: ObservableObject {
         guard syncConfig.isValid else { return }
         let config = syncConfig
         Task {
-            do {
-                try await RemoteWordSyncService.upsert(item, config: config)
-            } catch {
-                appLog("[WordSync] upsert error for '\(item.word)': \(error.localizedDescription)")
+            // 与 pushDelete 同样的闪断重试；最终失败也不丢——下次双向同步会把本地较新的词回推
+            for (attempt, delay) in [(1, 0.0), (2, 5.0), (3, 15.0)] {
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                do {
+                    try await RemoteWordSyncService.upsert(item, config: config)
+                    return
+                } catch {
+                    appLog("[WordSync] upsert error for '\(item.word)' (attempt \(attempt)): \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -332,14 +339,22 @@ final class WordStore: ObservableObject {
         let config = syncConfig
         let key = Self.wordKey(word)
         Task {
-            do {
-                try await RemoteWordSyncService.delete(word: word, config: config)
-                // 云端删除成功，销账
-                pendingDeletions.remove(key)
-                savePendingDeletions()
-            } catch {
-                appLog("[WordSync] delete error for '\(word)': \(error.localizedDescription) (已记账，下次同步重试)")
+            // 网络闪断容错：失败后 5s/15s 各重试一次，仍失败则留待下次同步重放
+            for (attempt, delay) in [(1, 0.0), (2, 5.0), (3, 15.0)] {
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                do {
+                    try await RemoteWordSyncService.delete(word: word, config: config)
+                    // 云端删除成功，销账
+                    pendingDeletions.remove(key)
+                    savePendingDeletions()
+                    return
+                } catch {
+                    appLog("[WordSync] delete error for '\(word)' (attempt \(attempt)): \(error.localizedDescription)")
+                }
             }
+            appLog("[WordSync] delete for '\(word)' 已记账，下次同步重试")
         }
     }
 
