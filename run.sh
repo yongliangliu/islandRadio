@@ -1,6 +1,6 @@
 #!/bin/bash
 # Island Radio — Build & Run script
-# Usage: ./run.sh [build|run|clean]
+# Usage: ./run.sh [build|run|package|clean]
 
 set -e
 cd "$(dirname "$0")"
@@ -12,11 +12,20 @@ ENTITLEMENTS="/tmp/${APP_NAME}.entitlements"
 # Detect build architecture automatically
 ARCH=$(uname -m)
 BUILD_TRIPLE="${ARCH}-apple-macosx"
+
+# Build configuration: debug (default) or release. Set by callers.
+CONFIG="debug"
 BINARY=".build/${BUILD_TRIPLE}/debug/${APP_NAME}"
 
 build() {
-    echo "==> Building..."
-    swift build
+    echo "==> Building (${CONFIG})..."
+    if [ "$CONFIG" = "release" ]; then
+        swift build -c release
+    else
+        swift build
+    fi
+
+    BINARY=".build/${BUILD_TRIPLE}/${CONFIG}/${APP_NAME}"
 
     echo "==> Creating app bundle..."
     rm -rf "$APP_DIR"
@@ -28,7 +37,7 @@ build() {
     [ -f "$ICON_SRC" ] && cp "$ICON_SRC" "$APP_DIR/Contents/Resources/IslandRadio.icns"
 
     # Copy resource bundle if exists
-    BUNDLE=".build/${BUILD_TRIPLE}/debug/${APP_NAME}_${APP_NAME}.bundle"
+    BUNDLE=".build/${BUILD_TRIPLE}/${CONFIG}/${APP_NAME}_${APP_NAME}.bundle"
     [ -d "$BUNDLE" ] && cp -R "$BUNDLE" "$APP_DIR/Contents/Resources/"
 
     # Info.plist
@@ -98,10 +107,30 @@ run() {
     open "$APP_DIR"
 }
 
+package() {
+    # Release build + distributable .zip
+    CONFIG="release"
+    build
+
+    # Strip quarantine attributes so the app runs on other machines
+    xattr -cr "$APP_DIR" 2>/dev/null || true
+
+    # Read version from Info.plist (falls back to "dev")
+    VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo "dev")
+    ZIP_PATH=".build/${APP_NAME}-${VERSION}-${ARCH}.zip"
+
+    echo "==> Packaging ${ZIP_PATH}..."
+    rm -f "$ZIP_PATH"
+    # ditto preserves resource forks / signature and produces a Finder-friendly zip
+    ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
+    echo "==> Package complete: $ZIP_PATH"
+}
+
 clean() {
     echo "==> Cleaning..."
     swift package clean
     rm -rf "$APP_DIR"
+    rm -f ".build/${APP_NAME}"-*.zip
     echo "==> Clean complete"
 }
 
@@ -113,11 +142,14 @@ case "${1:-run}" in
         build
         run
         ;;
+    package)
+        package
+        ;;
     clean)
         clean
         ;;
     *)
-        echo "Usage: $0 [build|run|clean]"
+        echo "Usage: $0 [build|run|package|clean]"
         exit 1
         ;;
 esac
