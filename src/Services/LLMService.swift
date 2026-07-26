@@ -1,9 +1,10 @@
 import Foundation
 
-/// LLM provider type
+/// Lookup provider type
 enum LLMProvider: String, Codable, CaseIterable {
     case openai
     case anthropic
+    case systemDictionary   // macOS 系统词典
 }
 
 /// LLM API configuration
@@ -25,6 +26,12 @@ struct LLMConfig: Codable, Equatable {
             endpoint: "https://api.anthropic.com/v1/messages",
             apiKey: "",
             model: "claude-sonnet-4-20250514"
+        ),
+        .systemDictionary: LLMConfig(
+            provider: .systemDictionary,
+            endpoint: "",
+            apiKey: "",
+            model: "System"
         ),
     ]
 
@@ -48,12 +55,20 @@ struct LLMConfig: Codable, Equatable {
 /// Service for translating words using LLM APIs.
 enum LLMService {
 
-    /// Translate a word in context using the configured LLM.
+    /// Translate a word in context using the configured provider.
     static func translateWord(
         _ word: String,
         sentence: String,
         config: LLMConfig
     ) async throws -> TranslationResult {
+        // System dictionary: local lookup, no network needed
+        if config.provider == .systemDictionary {
+            let t0 = CFAbsoluteTimeGetCurrent()
+            let result = await DictionaryService.lookup(word, sentence: sentence)
+            appLog("[Perf] system dict done: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
+            return result
+        }
+
         let t0 = CFAbsoluteTimeGetCurrent()
         let prompt = buildPrompt(word: word, sentence: sentence)
         appLog("[Perf] buildPrompt: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
@@ -64,6 +79,8 @@ enum LLMService {
             responseText = try await callOpenAI(prompt: prompt, config: config, t0: t0)
         case .anthropic:
             responseText = try await callAnthropic(prompt: prompt, config: config, t0: t0)
+        case .systemDictionary:
+            fatalError("systemDictionary handled above")
         }
         appLog("[Perf] API done: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s (\(config.provider.rawValue))")
 

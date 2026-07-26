@@ -16,12 +16,22 @@ struct LearningItem: Codable, Identifiable, Equatable {
     var timestamp: Date
     var mastered: Bool
     var levels: [String]?
+    /// Last local modification time — used for two-way sync conflict resolution (newer wins).
+    var updatedAt: Date?
+
+    /// Effective modification time (falls back to creation timestamp for legacy data).
+    var lastModified: Date { updatedAt ?? timestamp }
 }
 
 /// Manages the learning word list with UserDefaults persistence.
 @MainActor
 final class WordStore: ObservableObject {
     @Published var items: [LearningItem] = []
+
+    /// Whether a remote sync operation is in progress.
+    @Published private(set) var isSyncing = false
+    /// Last sync error message (nil when healthy).
+    @Published private(set) var syncError: String?
 
     /// Set of lowercase words for quick lookup (used for subtitle highlighting).
     var learnedWordsSet: Set<String> {
@@ -31,10 +41,31 @@ final class WordStore: ObservableObject {
     private static let storageKey = "island-radio-learning-list"
     private static let cacheKey = "island-radio-translation-cache"
     private static let maxCacheSize = 3000
+    private static let pendingDeletionsKey = "island-radio-pending-deletions"
+
+    /// 已在本地删除、但尚未成功同步到云端的词（小写 key）。
+    /// 刷新时先重放删除，并在合并时跳过这些词，避免离线删除的词“复活”。
+    private var pendingDeletions: Set<String> = []
+
+    /// 归一化单词 key：小写 + 去首尾空白。也作为 LearningItem.id 与云端 key。
+    nonisolated static func wordKey(_ word: String) -> String {
+        word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// Remote backend configuration. When valid, the remote store is the source of truth.
+    private(set) var syncConfig = WordSyncConfig.load()
+
+    /// Whether the remote backend is configured and should be used.
+    var isRemoteEnabled: Bool { syncConfig.isValid }
 
     init() {
         load()
         sanitizeItems()
+        normalizeIDs()
+        pendingDeletions = Set(UserDefaults.standard.stringArray(forKey: Self.pendingDeletionsKey) ?? [])
+        if syncConfig.isValid {
+            Task { await refreshFromRemote() }
+        }
     }
 
     // MARK: - CRUD
@@ -64,22 +95,45 @@ final class WordStore: ObservableObject {
                 if existing.sentenceTranslation == nil { existing.sentenceTranslation = item.sentenceTranslation }
                 if existing.levels == nil { existing.levels = item.levels }
             }
+            existing.updatedAt = Date()
             items[idx] = existing
         } else {
-            items.insert(item, at: 0)
+            var newItem = item
+            newItem.id = Self.wordKey(item.word)
+            newItem.updatedAt = Date()
+            items.insert(newItem, at: 0)
+        }
+        // 重新添加时撤销待删除记录
+        if pendingDeletions.remove(Self.wordKey(item.word)) != nil {
+            savePendingDeletions()
         }
         save()
+        // Push the resulting (deduped/merged) item to the remote backend.
+        if let idx = items.firstIndex(where: { $0.word.caseInsensitiveCompare(item.word) == .orderedSame }) {
+            pushUpsert(items[idx])
+        }
     }
 
     func remove(id: String) {
+        let removed = items.first { $0.id == id }
         items.removeAll { $0.id == id }
         save()
+        if let word = removed?.word {
+            if syncConfig.isValid {
+                // 先记账，云端删除成功后再销账；失败则留待下次同步重放
+                pendingDeletions.insert(Self.wordKey(word))
+                savePendingDeletions()
+            }
+            pushDelete(word: word)
+        }
     }
 
     func toggleMastered(id: String) {
         if let idx = items.firstIndex(where: { $0.id == id }) {
             items[idx].mastered.toggle()
+            items[idx].updatedAt = Date()
             save()
+            pushUpsert(items[idx])
         }
     }
 
@@ -137,6 +191,156 @@ final class WordStore: ObservableObject {
             return
         }
         items = loaded
+    }
+
+    /// 将历史数据的 UUID id 迁移为单词 key（小写单词），并去重。
+    private func normalizeIDs() {
+        var changed = false
+        var seen = Set<String>()
+        var result: [LearningItem] = []
+        for var item in items {
+            let key = Self.wordKey(item.word)
+            if item.id != key {
+                item.id = key
+                changed = true
+            }
+            // 同一单词只保留第一条（items 按新→旧排列）
+            if seen.contains(key) {
+                changed = true
+                continue
+            }
+            seen.insert(key)
+            result.append(item)
+        }
+        if changed {
+            items = result
+            save()
+            appLog("[WordStore] normalized ids to word keys (\(result.count) items)")
+        }
+    }
+
+    private func savePendingDeletions() {
+        UserDefaults.standard.set(Array(pendingDeletions), forKey: Self.pendingDeletionsKey)
+    }
+
+    // MARK: - Remote sync
+
+    /// Update the remote backend configuration; persists and refreshes if valid.
+    func updateSyncConfig(_ config: WordSyncConfig) {
+        let wasValid = syncConfig.isValid
+        syncConfig = config
+        config.save()
+        if config.isValid {
+            Task { await refreshFromRemote() }
+        } else if wasValid {
+            // Switched back to local-only mode.
+            syncError = nil
+        }
+    }
+
+    /// Two-way sync with the remote backend:
+    /// - 本地独有的词 → 上传云端
+    /// - 云端独有的词 → 并入本地
+    /// - 两边都有的词 → 比较最后修改时间，新者胜出；本地较新则回推云端
+    func refreshFromRemote() async {
+        guard syncConfig.isValid else { return }
+        isSyncing = true
+        syncError = nil
+        let config = syncConfig
+        do {
+            // 先重放尚未同步成功的删除（离线删除补偿）
+            for key in Array(pendingDeletions) {
+                do {
+                    try await RemoteWordSyncService.delete(word: key, config: config)
+                    pendingDeletions.remove(key)
+                } catch {
+                    appLog("[WordSync] pending delete retry failed for '\(key)': \(error.localizedDescription)")
+                }
+            }
+            savePendingDeletions()
+
+            let remote = try await RemoteWordSyncService.fetchAll(config: config)
+            var remoteByWord: [String: LearningItem] = [:]
+            for r in remote {
+                let key = Self.wordKey(r.word)
+                // 仍在待删除清单里的词不并回本地
+                guard !pendingDeletions.contains(key) else { continue }
+                remoteByWord[key] = r
+            }
+
+            var merged: [LearningItem] = []
+            var toUpload: [LearningItem] = []
+
+            for local in items {
+                let key = Self.wordKey(local.word)
+                if let remoteItem = remoteByWord.removeValue(forKey: key) {
+                    // 两边都有：最后修改时间新者胜出
+                    if local.lastModified > remoteItem.lastModified {
+                        merged.append(local)
+                        toUpload.append(local)
+                    } else {
+                        merged.append(remoteItem)
+                    }
+                } else {
+                    // 本地独有 → 上传
+                    merged.append(local)
+                    toUpload.append(local)
+                }
+            }
+            // 云端独有 → 并入本地
+            merged.append(contentsOf: remoteByWord.values)
+
+            for item in toUpload {
+                try? await RemoteWordSyncService.upsert(item, config: config)
+            }
+
+            merged.sort { $0.timestamp > $1.timestamp }
+            items = merged
+            save()
+            appLog("[WordSync] two-way sync done: \(remote.count) remote, uploaded \(toUpload.count), total \(merged.count)")
+        } catch {
+            syncError = error.localizedDescription
+            appLog("[WordSync] refresh error: \(error.localizedDescription)")
+        }
+        isSyncing = false
+    }
+
+    /// Test connectivity with the given (possibly unsaved) config; returns remote item count.
+    func testSyncConnection(_ config: WordSyncConfig) async -> Result<Int, Error> {
+        do {
+            let count = try await RemoteWordSyncService.test(config: config)
+            return .success(count)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func pushUpsert(_ item: LearningItem) {
+        guard syncConfig.isValid else { return }
+        let config = syncConfig
+        Task {
+            do {
+                try await RemoteWordSyncService.upsert(item, config: config)
+            } catch {
+                appLog("[WordSync] upsert error for '\(item.word)': \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func pushDelete(word: String) {
+        guard syncConfig.isValid else { return }
+        let config = syncConfig
+        let key = Self.wordKey(word)
+        Task {
+            do {
+                try await RemoteWordSyncService.delete(word: word, config: config)
+                // 云端删除成功，销账
+                pendingDeletions.remove(key)
+                savePendingDeletions()
+            } catch {
+                appLog("[WordSync] delete error for '\(word)': \(error.localizedDescription) (已记账，下次同步重试)")
+            }
+        }
     }
 
     // MARK: - Data sanitization

@@ -44,6 +44,7 @@ struct MainContentView: View {
         }
         .sheet(isPresented: $showSettingsSheet) {
             LLMSettingsView()
+                .environmentObject(wordStore)
         }
         .sheet(item: $editingStation) { station in
             EditStationView(station: station)
@@ -105,7 +106,7 @@ struct MainContentView: View {
                     .frame(width: 28, height: 28)
             }
             .buttonStyle(.borderless)
-            .help("LLM 设置")
+            .help("查询服务设置")
 
             Button(action: { showAddSheet = true }) {
                 Image(systemName: "plus")
@@ -640,43 +641,72 @@ struct EditStationView: View {
     }
 }
 
-// MARK: - LLM Settings
+// MARK: - Lookup Service Settings
 
 struct LLMSettingsView: View {
     @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var wordStore: WordStore
 
     @State private var config = LLMConfig.load()
     @State private var testStatus = ""
     @State private var isTesting = false
 
+    // 生词本云端同步
+    @State private var syncConfig = WordSyncConfig.load()
+    @State private var syncTestStatus = ""
+    @State private var isSyncTesting = false
+
+    private var isSystemDict: Bool { config.provider == .systemDictionary }
+
     var body: some View {
         VStack(spacing: 16) {
-            Text("LLM 设置")
+            Text("查询服务设置")
                 .font(.headline)
 
-            Form {
-                Picker("服务商", selection: $config.provider) {
-                    Text("OpenAI").tag(LLMProvider.openai)
-                    Text("Anthropic").tag(LLMProvider.anthropic)
-                }
-                .onChange(of: config.provider) { newProvider in
-                    // Fill preset endpoint/model when switching provider
-                    if let preset = LLMConfig.presets[newProvider] {
-                        config.endpoint = preset.endpoint
-                        config.model = preset.model
+            VStack(spacing: 10) {
+                settingsRow("服务商") {
+                    Picker("", selection: $config.provider) {
+                        Text("OpenAI").tag(LLMProvider.openai)
+                        Text("Anthropic").tag(LLMProvider.anthropic)
+                        Text("系统词典").tag(LLMProvider.systemDictionary)
+                    }
+                    .labelsHidden()
+                    .onChange(of: config.provider) { newProvider in
+                        if let preset = LLMConfig.presets[newProvider] {
+                            config.endpoint = preset.endpoint
+                            config.model = preset.model
+                        }
                     }
                 }
 
-                TextField("API Endpoint", text: $config.endpoint)
-                    .textFieldStyle(.roundedBorder)
+                if isSystemDict {
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.secondary)
+                        Text("使用 macOS 内置词典查询，支持英汉/汉英，无需配置。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, labelWidth + 8)
+                } else {
+                    settingsRow("Endpoint") {
+                        TextField("https://...", text: $config.endpoint)
+                            .textFieldStyle(.roundedBorder)
+                    }
 
-                SecureField("API Key", text: $config.apiKey)
-                    .textFieldStyle(.roundedBorder)
+                    settingsRow("API Key") {
+                        SecureField("sk-...", text: $config.apiKey)
+                            .textFieldStyle(.roundedBorder)
+                    }
 
-                TextField("模型", text: $config.model)
-                    .textFieldStyle(.roundedBorder)
+                    settingsRow("模型") {
+                        TextField("模型名称", text: $config.model)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
             }
-            .formStyle(.grouped)
+            .padding(.horizontal)
 
             // Test status
             if !testStatus.isEmpty {
@@ -686,28 +716,96 @@ struct LLMSettingsView: View {
                     .lineLimit(2)
             }
 
+            Divider()
+
+            // MARK: 生词本云端同步
+            VStack(spacing: 10) {
+                HStack {
+                    Text("生词本云端同步")
+                        .font(.headline)
+                    Spacer()
+                    if wordStore.isSyncing {
+                        ProgressView().scaleEffect(0.6)
+                    }
+                }
+
+                settingsRow("服务地址") {
+                    TextField("https://...", text: $syncConfig.baseURL)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                settingsRow("Token") {
+                    SecureField("留空则仅本地存储", text: $syncConfig.token)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                settingsRow("数据表") {
+                    TextField("st_words", text: $syncConfig.table)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .foregroundStyle(.secondary)
+                    Text("填写服务地址与 Token 后启用云端同步，生词本将在多设备间共享；留空则仅保存在本机。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack {
+                    Button("测试同步") {
+                        testSync()
+                    }
+                    .disabled(isSyncTesting || !syncConfig.isValid)
+
+                    if !syncTestStatus.isEmpty {
+                        Text(syncTestStatus)
+                            .font(.caption)
+                            .foregroundStyle(syncTestStatus.contains("成功") ? .green : .red)
+                            .lineLimit(2)
+                    }
+                    Spacer()
+                }
+            }
+            .padding(.horizontal)
+
             HStack {
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
 
                 Spacer()
 
-                Button("测试连接") {
+                Button("测试") {
                     testConnection()
                 }
-                .disabled(config.apiKey.isEmpty || isTesting)
+                .disabled(isTesting || (!isSystemDict && config.apiKey.isEmpty))
 
                 Button("保存") {
                     config.save()
+                    wordStore.updateSyncConfig(syncConfig)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(config.apiKey.isEmpty)
+                .disabled(!isSystemDict && config.apiKey.isEmpty)
             }
             .padding(.horizontal)
         }
         .padding()
-        .frame(width: 400)
+        .frame(width: 420)
+    }
+
+    private let labelWidth: CGFloat = 72
+
+    /// 统一的"标签 + 输入控件"行，保证左侧标签右对齐、输入框对齐
+    private func settingsRow(_ label: String, @ViewBuilder content: () -> some View) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(width: labelWidth, alignment: .trailing)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func testConnection() {
@@ -717,11 +815,27 @@ struct LLMSettingsView: View {
         Task {
             do {
                 let result = try await LLMService.translateWord("hello", sentence: "Hello world", config: config)
-                testStatus = "连接成功: \(result.meaning ?? "OK")"
+                testStatus = "成功: \(result.meaning ?? "OK")"
             } catch {
                 testStatus = "失败: \(error.localizedDescription)"
             }
             isTesting = false
+        }
+    }
+
+    private func testSync() {
+        isSyncTesting = true
+        syncTestStatus = "测试中..."
+
+        Task {
+            let result = await wordStore.testSyncConnection(syncConfig)
+            switch result {
+            case .success(let count):
+                syncTestStatus = "成功：云端共 \(count) 个生词"
+            case .failure(let error):
+                syncTestStatus = "失败：\(error.localizedDescription)"
+            }
+            isSyncTesting = false
         }
     }
 }

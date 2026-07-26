@@ -474,7 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let wordStore = wordStore else { return }
 
         let item = LearningItem(
-            id: UUID().uuidString,
+            id: WordStore.wordKey(word),
             word: word,
             phonetic: result.phonetic,
             rootAnalysis: result.rootAnalysis,
