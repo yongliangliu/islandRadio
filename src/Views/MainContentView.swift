@@ -736,6 +736,51 @@ struct EditStationView: View {
 
 // MARK: - Lookup Service Settings
 
+/// 密钥输入框：默认密文，可切换明文查看；明文状态下可一键复制
+struct SecretField: View {
+    let placeholder: String
+    @Binding var text: String
+
+    @State private var isRevealed = false
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Group {
+                if isRevealed {
+                    TextField(placeholder, text: $text)
+                } else {
+                    SecureField(placeholder, text: $text)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+
+            Button(action: { isRevealed.toggle() }) {
+                Image(systemName: isRevealed ? "eye.slash" : "eye")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help(isRevealed ? "隐藏" : "查看")
+
+            if isRevealed && !text.isEmpty {
+                Button(action: copyToClipboard) {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .foregroundStyle(copied ? .green : .secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("复制")
+            }
+        }
+    }
+
+    private func copyToClipboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+    }
+}
+
 struct LLMSettingsView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var wordStore: WordStore
@@ -789,8 +834,7 @@ struct LLMSettingsView: View {
                     }
 
                     settingsRow("API Key") {
-                        SecureField("sk-...", text: $config.apiKey)
-                            .textFieldStyle(.roundedBorder)
+                        SecretField(placeholder: "sk-...", text: $config.apiKey)
                     }
 
                     settingsRow("模型") {
@@ -828,8 +872,7 @@ struct LLMSettingsView: View {
                 }
 
                 settingsRow("Token") {
-                    SecureField("留空则仅本地存储", text: $syncConfig.token)
-                        .textFieldStyle(.roundedBorder)
+                    SecretField(placeholder: "留空则仅本地存储", text: $syncConfig.token)
                 }
 
                 settingsRow("数据表") {
