@@ -13,6 +13,17 @@ struct MainContentView: View {
     @State private var editingStation: RadioStation?
     @State private var selectedTab = 0
 
+    // 生词本筛选条件
+    @State private var wordLevelFilter: WordLevelFilter = .all
+    @State private var wordKeyword = ""
+
+    /// 等级筛选：全部 / 指定等级 / 无等级
+    enum WordLevelFilter: Hashable {
+        case all
+        case level(String)
+        case none
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -172,6 +183,35 @@ struct MainContentView: View {
 
     // MARK: - Word list
 
+    /// 当前数据中出现过的等级（按 基础/中级/高级/GRE 优先排序，其余按字序追加）
+    private var availableLevels: [String] {
+        let preferred = ["基础", "中级", "高级", "GRE"]
+        let all = Set(wordStore.items.flatMap { $0.levels ?? [] })
+        return preferred.filter { all.contains($0) } + all.subtracting(preferred).sorted()
+    }
+
+    /// 按等级 + 关键词过滤后的列表；列表展示与 PDF 导出均以此为准
+    private var filteredWordItems: [LearningItem] {
+        let keyword = wordKeyword.trimmingCharacters(in: .whitespaces)
+        return wordStore.items.filter { item in
+            switch wordLevelFilter {
+            case .all:
+                break
+            case .level(let lv):
+                guard item.levels?.contains(lv) == true else { return false }
+            case .none:
+                guard item.levels == nil || item.levels?.isEmpty == true else { return false }
+            }
+            if !keyword.isEmpty {
+                let hit = item.word.localizedCaseInsensitiveContains(keyword)
+                    || (item.meaning?.localizedCaseInsensitiveContains(keyword) ?? false)
+                    || item.sentence.localizedCaseInsensitiveContains(keyword)
+                if !hit { return false }
+            }
+            return true
+        }
+    }
+
     private var wordListView: some View {
         Group {
             if wordStore.items.isEmpty {
@@ -191,38 +231,91 @@ struct MainContentView: View {
                 }
             } else {
                 VStack(spacing: 0) {
-                    // Toolbar with export button
-                    HStack {
+                    // Toolbar: keyword search + level filter + export
+                    HStack(spacing: 8) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            TextField("搜索单词/释义", text: $wordKeyword)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 12))
+                            if !wordKeyword.isEmpty {
+                                Button(action: { wordKeyword = "" }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+                        .frame(maxWidth: 170)
+
+                        Picker("", selection: $wordLevelFilter) {
+                            Text("全部").tag(WordLevelFilter.all)
+                            ForEach(availableLevels, id: \.self) { lv in
+                                Text(lv).tag(WordLevelFilter.level(lv))
+                            }
+                            Text("无等级").tag(WordLevelFilter.none)
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .fixedSize()
+
+                        Text("\(filteredWordItems.count)/\(wordStore.items.count)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
                         Spacer()
+
                         Button(action: exportFlashcardPDF) {
                             Label("导出 PDF", systemImage: "square.and.arrow.up")
                                 .font(.system(size: 12))
                         }
                         .buttonStyle(.borderless)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
+                        .disabled(filteredWordItems.isEmpty)
+                        .help("导出当前筛选结果；无筛选条件时导出全部")
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
                     Divider()
-                    List {
-                        ForEach(wordStore.items) { item in
-                            WordRow(item: item, onDelete: {
-                                wordStore.remove(id: item.id)
-                            })
+                    if filteredWordItems.isEmpty {
+                        VStack(spacing: 8) {
+                            Spacer()
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.tertiary)
+                            Text("无匹配的生词")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
                         }
-                        .onDelete { offsets in
-                            let ids = offsets.map { wordStore.items[$0].id }
-                            ids.forEach { wordStore.remove(id: $0) }
+                    } else {
+                        List {
+                            ForEach(filteredWordItems) { item in
+                                WordRow(item: item, onDelete: {
+                                    wordStore.remove(id: item.id)
+                                })
+                            }
+                            .onDelete { offsets in
+                                let ids = offsets.map { filteredWordItems[$0].id }
+                                ids.forEach { wordStore.remove(id: $0) }
+                            }
                         }
+                        .listStyle(.inset)
                     }
-                    .listStyle(.inset)
                 }
             }
         }
     }
 
-    /// Export word list as PDF flashcards (A4, 3 columns × 4 rows per page)
+    /// Export word list as PDF flashcards (A4, 3 columns × 4 rows per page).
+    /// 导出范围 = 当前筛选结果；无筛选条件时即全部。
     private func exportFlashcardPDF() {
-        let items = wordStore.items.filter { !$0.mastered }
+        let items = filteredWordItems
         guard !items.isEmpty else { return }
 
         let panel = NSSavePanel()
